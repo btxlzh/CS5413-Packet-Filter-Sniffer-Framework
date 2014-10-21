@@ -158,12 +158,12 @@ int main(int argc, char **argv)
                     e.dst_port=atoi(optarg);
                 break;
             case 5:     // action
-                if(strcmp(optarg,"None")==0)
-                    e.action= ACTION_NONE;
+                if(strcmp(optarg,"null")==0)
+                    e.action=SNIFFER_ACTION_NULL;
                 else if(strcmp(optarg,"capture")==0)
-                    e.action=ACTION_CAPTURE;
-                else if(strcmp(optarg,"DPI")==0)
-                    e.action=ACTION_DPI;
+                    e.action=SNIFFER_ACTION_CAPTURE;
+                else if(strcmp(optarg,"dpi")==0)
+                    e.action=SNIFFER_ACTION_DPI;
                 break;
             case 6:     // dev
                 dev_file=optarg;
