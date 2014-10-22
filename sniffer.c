@@ -24,6 +24,10 @@
 #include <linux/list.h>
 #include "sniffer_ioctl.h"
 #include "asm/spinlock.h"
+#include <linux/seq_file.h>
+#include <linux/proc_fs.h>
+#include <linux/irqflags.h>
+#include <linux/textsearch.h>
 
 MODULE_AUTHOR("");
 MODULE_DESCRIPTION("CS5413 Packet Filter / Sniffer Framework");
@@ -59,32 +63,36 @@ struct rule{
 };
 static struct rule rules;
 struct rule *r_tmp,*r_t;
-spinlock_t r_lock ;
+int r_lock ;
 wait_queue_head_t r_que;
-#define SIGNATURE "Hakim"
-char * signature;
+static const char signature[] ="got";
+#define SIG_LENGTH (ARRAY_SIZE(signature) - 1)
+struct ts_config *conf;
+struct ts_state state;
 static inline struct tcphdr * ip_tcp_hdr(struct iphdr *iph)
 {
     struct tcphdr *tcph = (void *) iph + iph->ihl*4;
     return tcph;
 }
-
 /* From kernel to userspace */
     static ssize_t 
 sniffer_fs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)
 {
+    if(atomic_read(&refcnt)>0) return -1;
+    atomic_inc(&refcnt);
     struct skb_list* tmp;
     int cnt=-1;
     wait_event_interruptible(r_que,!list_empty(&skbs));
     if(list_empty(&skbs)) return -1; 
+    local_irq_save(r_lock);
     tmp = list_entry(skbs.next, struct skb_list, list);
     cnt=tmp->skb->len;
     printk(KERN_DEBUG"get %d byte\n",cnt);
     copy_to_user(buf, tmp->skb->data, tmp->skb->len);
 
-    spin_lock_irq(&r_lock);  
     list_del(skbs.next);
-    spin_unlock_irq(&r_lock);
+    local_irq_restore(r_lock);
+    atomic_dec(&refcnt);
     //printk(KERN_DEBUG "Read buff %d\n",cnt);
     return cnt;
 }
@@ -141,7 +149,9 @@ static long sniffer_fs_ioctl(struct file *file, unsigned int cmd, unsigned long 
             };
             r_tmp= vmalloc(sizeof(struct rule));
             memcpy(r_tmp,entry,sizeof(struct sniffer_flow_entry));
+            local_irq_save(r_lock);
             list_add(&(r_tmp->list), &(rules.list));
+            local_irq_restore(r_lock);
             break;
         default:
             printk(KERN_DEBUG "Unknown command\n");
@@ -150,12 +160,79 @@ static long sniffer_fs_ioctl(struct file *file, unsigned int cmd, unsigned long 
 
     return err;
 }
+void ip_rev(unsigned char * ret,uint32_t x){
+    ret[3] = x & 0xff;
+    ret[2] = (x >> 8) & 0xff ;
+    ret[1] = (x >> 16) & 0xff ;
+    ret[0] = (x >> 24) & 0xff ;
+}
+static int sniffer_proc_read(struct seq_file *output, void *v){
+    struct rule* tmp;
+    unsigned char ret[4];
+    seq_printf(output,"[command] [src_ip]       [src_port]  [dst_ip]       [dst_port] [action]\n");
+    list_for_each_entry(tmp, &rules.list, list){
+        if(tmp->mode==SNIFFER_FLOW_ENABLE)
+            seq_printf(output," enable");
+        else 
+            seq_printf(output," disable");
+        
+        
+        if(tmp->src_ip==0)
+            seq_printf(output,"   any            ");
+        else {
+            ip_rev(ret,tmp->src_ip);
+            seq_printf(output,"   %3d.%3d.%3d.%3d",ret[3],ret[2],ret[1],ret[0]);    
+        }
+        
+        
+        if(tmp->src_port==0)
+            seq_printf(output,"    any");
+        else
+            seq_printf(output,"  %5d",tmp->src_port);
+        
+        
+        if(tmp->dst_ip==0)
+            seq_printf(output,"     any            ");
+        else {
+            ip_rev(ret,tmp->dst_ip);
+            seq_printf(output,"     %3d.%3d.%3d.%3d",ret[3],ret[2],ret[1],ret[0]); 
+        }
+
+
+        if(tmp->dst_port==0)
+            seq_printf(output,"    any    ");
+        else
+            seq_printf(output,"  %5d    ",tmp->dst_port);
+        
+        seq_printf(output," ");
+        if(tmp->action==SNIFFER_ACTION_CAPTURE)
+            seq_printf(output,"capture");
+        else if(tmp->action==SNIFFER_ACTION_DPI) 
+            seq_printf(output,"dpi");
+        else if(tmp->action==SNIFFER_ACTION_NULL) 
+            seq_printf(output,"none");            
+
+        seq_printf(output,"\n");
+    }       
+    return 0;
+
+}
+static int sniffer_proc_open(struct inode *inode, struct file *file ){
+    return single_open(file, sniffer_proc_read, NULL);
+}
 
 static struct file_operations sniffer_fops = {
     .open = sniffer_fs_open,
     .release = sniffer_fs_release,
     .read = sniffer_fs_read,
     .unlocked_ioctl = sniffer_fs_ioctl,
+    .owner = THIS_MODULE,
+};
+static struct file_operations sniffer_proc = {
+    .open = sniffer_proc_open,
+    .release = single_release,
+    .read = seq_read,
+    .llseek = seq_lseek,
     .owner = THIS_MODULE,
 };
 
@@ -177,6 +254,7 @@ static unsigned int sniffer_nf_hook(unsigned int hook, struct sk_buff* skb,
             d_ip=iph->daddr;
             s_port=ntohs(tcph->source);
             d_port=ntohs(tcph->dest);
+            local_irq_save(r_lock);
             list_for_each_entry(r_t, &rules.list, list){
                 if( (s_ip==r_t->src_ip || r_t->src_ip==0) &&  (d_ip==r_t->dst_ip || r_t->dst_ip==0||r_t->dst_ip==0x100007f) &&
                         (d_port==r_t->dst_port ||r_t->dst_port==0 ) && (s_port==r_t->src_port||r_t->src_port ==0) ){
@@ -184,40 +262,13 @@ static unsigned int sniffer_nf_hook(unsigned int hook, struct sk_buff* skb,
                         //printk(KERN_DEBUG"caputre!\n");
                         struct skb_list* skb_tmp=kmalloc(sizeof(struct skb_list),GFP_ATOMIC);
                         skb_tmp->skb=skb_copy(skb,GFP_ATOMIC);
-                        spin_lock_irq(&r_lock); 
                         list_add_tail(&(skb_tmp->list), &(skbs));
-                        spin_unlock_irq(&r_lock);
                         wake_up_interruptible(&r_que);
                     } 
                     if(r_t->action == SNIFFER_ACTION_DPI){
-                        //printk(KERN_DEBUG"dpi\n");
-                        struct zl_ip *ip_h =skb->data;
-                        int ip_size=IP_HL(ip_h)*4;
-                        struct zl_tcp *tcp_h = ip_h+ip_size;
-                        char *data = tcp_h->data;
-                        int data_len=skb->len-ip_size-sizeof(struct zl_tcp);
-                        int i=0,j;
-                   
-                        int sig_len=strlen(SIGNATURE);
-                        //printk(KERN_DEBUG"sig len:%d,sig:%s\n,data:%s\n",sig_len,signature,data);
-                        int flag=0,flag_w=0;
-                        while(i<data_len-sig_len){
-                            flag_w=1;
-
-                            for(j=0;j<sig_len;j++){
-                                if(data[i+j]!=signature[j]){
-                                    flag_w=0;
-                                    break;
-                                }
-                            }
- 
-                            if(flag_w) {
-                                flag=1;
-                                break;
-                            }
-                            ++i;
-                        }
-                        if(flag){
+                        unsigned int pos = 0;
+                        pos = skb_find_text(skb,0,skb->len,conf,&state);
+                        if(pos != UINT_MAX){
                             printk(KERN_DEBUG"dpi_DROP\n");
                             r_t->mode=SNIFFER_FLOW_DISABLE;
                             return NF_DROP;
@@ -235,6 +286,7 @@ static unsigned int sniffer_nf_hook(unsigned int hook, struct sk_buff* skb,
             printk(KERN_DEBUG "Rejected src:%x %d  dst: %x %d",iph->saddr, s_port, iph->daddr,d_port);
             return NF_DROP;
         }
+        local_irq_restore(r_lock);
     }
     return NF_ACCEPT;
 }
@@ -251,6 +303,7 @@ static int __init sniffer_init(void)
     }
 
     cdev_init(&sniffer_cdev, &sniffer_fops);
+    proc_create("sniffer", 0, NULL, &sniffer_proc);
     status = cdev_add(&sniffer_cdev, sniffer_dev, sniffer_minor);
     if (status < 0) {
         printk(KERN_ERR "cdev_add failed %d\n", status);
@@ -260,7 +313,7 @@ static int __init sniffer_init(void)
 
     atomic_set(&refcnt, 0);
     INIT_LIST_HEAD(&skbs);
-
+    conf = textsearch_prepare("kmp",signature, SIG_LENGTH,GFP_KERNEL,TS_AUTOLOAD); 
     /* register netfilter hook */
     memset(&nf_hook_ops, 0, sizeof(nf_hook_ops));
     nf_hook_ops.hook = sniffer_nf_hook;
@@ -276,7 +329,6 @@ static int __init sniffer_init(void)
     INIT_LIST_HEAD(&rules.list);
     DEFINE_SPINLOCK(r_lock);
     init_waitqueue_head(&r_que);
-    signature=SIGNATURE;
     return 0;
 
 out_add:
@@ -289,13 +341,14 @@ out:
 
 static void __exit sniffer_exit(void)
 {
-
+    textsearch_destroy(conf);
     if (nf_hook_ops.hook) {
         nf_unregister_hook(&nf_hook_ops);
         memset(&nf_hook_ops, 0, sizeof(nf_hook_ops));
     }
     cdev_del(&sniffer_cdev);
     unregister_chrdev_region(sniffer_dev, sniffer_minor);
+    remove_proc_entry("sniffer",NULL);
 }
 
 module_init(sniffer_init);
