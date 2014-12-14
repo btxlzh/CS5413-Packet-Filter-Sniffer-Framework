@@ -362,6 +362,13 @@ out:
 
 static void __exit sniffer_exit(void)
 {
+    //free skblist
+    struct skb_list* tmp;
+    while( !list_empty(&skbs) ) {
+        tmp = list_entry(skbs.next, struct skb_list, list);         
+        list_del(skbs.next);
+        kfree(tmp);
+    }
     textsearch_destroy(conf);
     if (nf_hook_ops.hook) {
         nf_unregister_hook(&nf_hook_ops);
