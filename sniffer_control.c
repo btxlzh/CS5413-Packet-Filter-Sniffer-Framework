@@ -39,6 +39,7 @@ int sniffer_send_command(struct sniffer_flow_entry *flow)
         return 0;
     }
     ioctl(fd,flow->mode,flow);
+    close(fd); 
     return 0;
 }
 void sniffer_flow_entry_init(struct sniffer_flow_entry* e){

@@ -1,3 +1,5 @@
+#define _BSD_SOURCE
+#define __FAVOR_BSD
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -10,14 +12,20 @@
 #include "sniffer_ioctl.h"
 #include <fcntl.h>
 #include <arpa/inet.h>
+#include <netinet/ip.h>   /* Internet Protocol  */
+#include <netinet/tcp.h>   /* Internet Protocol  */
+
 static char * program_name;
 static char * dev_file = "sniffer.dev";
+
+static char *buf;
+int outfd;
+
 void usage() 
 {
     fprintf(stderr, "Usage: %s [-i input_file] [-o output_file]\n", program_name);
     exit(EXIT_FAILURE);
 }
-int outfd;
 int print_packet(char * pkt, int len)
 {
     /* print format is :
@@ -25,28 +33,20 @@ int print_packet(char * pkt, int len)
      * pkt[0] pkt[1] ...    pkt[64] \n
      * ...
      * where pkt[i] is a hex byte */
-    int i,ip_size;
-    struct zl_ip *ip_h =pkt;
-    ip_size=IP_HL(ip_h)*4;
-    struct zl_tcp *tcp_h = pkt+ip_size;
-    int sp=0,dp=0;
-    sp=ntohs(tcp_h->th_sport);
-    dp=ntohs(tcp_h->th_dport);
-    struct in_addr a;
-    a.s_addr=ip_h->ip_src;
-    char *sinfo = strdup(inet_ntoa(a));
-    a.s_addr=ip_h->ip_dst;
-    char *dinfo = strdup(inet_ntoa(a));
-    
-    printf("%s:%d -> %s:%d",sinfo,sp,dinfo,dp);
-    
-    for(i = 0; i < len; ++i){
-        if(i % 64 == 0)printf("\n");
-        printf("%.2x ",(unsigned char)pkt[i]);
+    int i;
+    struct ip *iph = NULL;          
+    struct tcphdr *tcph = NULL;
+    iph = (struct ip *)(pkt);
+    tcph = (struct tcphdr*)(pkt+20);
+
+    dprintf(outfd, "\n%s:%d -> %s:%d", inet_ntoa(iph->ip_src), ntohs(tcph->th_sport), inet_ntoa(iph->ip_dst), ntohs(tcph->th_dport));
+
+    for (i = 0; i < len; ++i){
+        if(i % 64 == 0)dprintf(outfd,"\n");
+            dprintf(outfd,"%.2x ",(unsigned char)pkt[i]);
     }
-    printf("\n");
-    free(sinfo);
-    free(dinfo);
+    dprintf(outfd,"\n");
+    
     return 0;
 }
 
@@ -64,6 +64,11 @@ int main(int argc, char **argv)
                 break;
             case 'o':
                 output_file = strdup(optarg);
+                outfd = open(output_file, O_WRONLY);
+                if(outfd < 0){
+                    printf("Can't open output file %s\n", output_file);
+                    exit(1);
+                }
                 break;
             default:
                 usage();
@@ -71,13 +76,26 @@ int main(int argc, char **argv)
     }
     //write("input:%s,output:%s\n",input_file,output_file);
     int fd=open(input_file,O_RDONLY);
-    if(output_file) 
-         freopen(output_file,"w",stdout);
-    char *buf = malloc(4096*sizeof(char));
-    printf("ready\n");
+
+    buf = malloc(4096*sizeof(char));
+    //printf("ready\n");
     int len=-1;
-    while((len = read(fd,buf,0))>0){
+    while((len = read(fd,buf,4096))>0){
         print_packet(buf,len);
     }
+    if(len == -456){
+        printf("One reader already exists\n");
+    }
+    if(len < 0 ){
+        printf("Read Error\n");
+    }
+    if(len == 0){
+        printf("No more packets\n");
+    }
+
+    free(output_file);
+    free(buf);
+    close(fd);
+    close(outfd);
     return 0;
 }

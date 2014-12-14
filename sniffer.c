@@ -37,7 +37,7 @@ static dev_t sniffer_dev;
 static struct cdev sniffer_cdev;
 static int sniffer_minor = 1;
 atomic_t refcnt;
-
+atomic_t cap_pkts;
 static int hook_chain = NF_INET_LOCAL_IN;
 static int hook_prio = NF_IP_PRI_FIRST;
 struct nf_hook_ops nf_hook_ops;
@@ -78,19 +78,33 @@ static inline struct tcphdr * ip_tcp_hdr(struct iphdr *iph)
     static ssize_t 
 sniffer_fs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)
 {
-    if(atomic_read(&refcnt)>0) return -1;
+    if(atomic_read(&refcnt)>0) return -456;
     atomic_inc(&refcnt);
     struct skb_list* tmp;
     int cnt=-1;
-    wait_event_interruptible(r_que,!list_empty(&skbs));
-    if(list_empty(&skbs)) return -1; 
+    while(atomic_read(&cap_pkts) == 0){ /*no data*/
+       // printk(KERN_DEBUG"No pkts ");
+        if(wait_event_interruptible(r_que, atomic_read(&cap_pkts) > 0)){
+            atomic_dec(&refcnt);
+            return -ERESTARTSYS;
+        }
+    }
+
+    if(list_empty(&skbs)){ 
+        atomic_dec(&refcnt);
+        return -1; 
+    }
     local_irq_save(r_lock);
+
     tmp = list_entry(skbs.next, struct skb_list, list);
     cnt=tmp->skb->len;
-    printk(KERN_DEBUG"get %d byte\n",cnt);
-    copy_to_user(buf, tmp->skb->data, tmp->skb->len);
+    if(cnt>4000)cnt=4000;
+    copy_to_user(buf, tmp->skb->data, cnt);
+    //free skbs.next and the entry memory
+    list_del(skbs.next); 
+    kfree(tmp);
 
-    list_del(skbs.next);
+    atomic_dec(&cap_pkts);
     local_irq_restore(r_lock);
     atomic_dec(&refcnt);
     //printk(KERN_DEBUG "Read buff %d\n",cnt);
@@ -175,22 +189,22 @@ static int sniffer_proc_read(struct seq_file *output, void *v){
             seq_printf(output," enable");
         else 
             seq_printf(output," disable");
-        
-        
+
+
         if(tmp->src_ip==0)
             seq_printf(output,"   any            ");
         else {
             ip_rev(ret,tmp->src_ip);
             seq_printf(output,"   %3d.%3d.%3d.%3d",ret[3],ret[2],ret[1],ret[0]);    
         }
-        
-        
+
+
         if(tmp->src_port==0)
             seq_printf(output,"    any");
         else
             seq_printf(output,"  %5d",tmp->src_port);
-        
-        
+
+
         if(tmp->dst_ip==0)
             seq_printf(output,"     any            ");
         else {
@@ -203,7 +217,7 @@ static int sniffer_proc_read(struct seq_file *output, void *v){
             seq_printf(output,"    any    ");
         else
             seq_printf(output,"  %5d    ",tmp->dst_port);
-        
+
         seq_printf(output," ");
         if(tmp->action==SNIFFER_ACTION_CAPTURE)
             seq_printf(output,"capture");
@@ -263,13 +277,19 @@ static unsigned int sniffer_nf_hook(unsigned int hook, struct sk_buff* skb,
                         struct skb_list* skb_tmp=kmalloc(sizeof(struct skb_list),GFP_ATOMIC);
                         skb_tmp->skb=skb_copy(skb,GFP_ATOMIC);
                         list_add_tail(&(skb_tmp->list), &(skbs));
+                        atomic_inc(&cap_pkts);
                         wake_up_interruptible(&r_que);
+                        if(r_t->mode == SNIFFER_FLOW_ENABLE)
+                            return NF_ACCEPT;
+                        else
+                            return NF_DROP;
                     } 
+
                     if(r_t->action == SNIFFER_ACTION_DPI){
                         unsigned int pos = 0;
                         pos = skb_find_text(skb,0,skb->len,conf,&state);
                         if(pos != UINT_MAX){
-                            printk(KERN_DEBUG"dpi_DROP\n");
+                            //printk(KERN_DEBUG"dpi_DROP\n");
                             r_t->mode=SNIFFER_FLOW_DISABLE;
                             return NF_DROP;
                         }
@@ -277,13 +297,13 @@ static unsigned int sniffer_nf_hook(unsigned int hook, struct sk_buff* skb,
                     }
 
                     if (r_t->mode==SNIFFER_FLOW_ENABLE){
-                        printk(KERN_DEBUG "Accepted|!!!!!!!!!!! src:%x %d  dst: %x %d",iph->saddr, s_port, iph->daddr,d_port);
+                        //printk(KERN_DEBUG "Accepted|!!!!!!!!!!! src:%x %d  dst: %x %d",iph->saddr, s_port, iph->daddr,d_port);
                         return NF_ACCEPT;
                     }
                     else return NF_DROP;
                 }  		
             }   
-            printk(KERN_DEBUG "Rejected src:%x %d  dst: %x %d",iph->saddr, s_port, iph->daddr,d_port);
+            //printk(KERN_DEBUG "Rejected src:%x %d  dst: %x %d",iph->saddr, s_port, iph->daddr,d_port);
             return NF_DROP;
         }
         local_irq_restore(r_lock);
@@ -312,6 +332,7 @@ static int __init sniffer_init(void)
     }
 
     atomic_set(&refcnt, 0);
+    atomic_set(&cap_pkts, 0);
     INIT_LIST_HEAD(&skbs);
     conf = textsearch_prepare("kmp",signature, SIG_LENGTH,GFP_KERNEL,TS_AUTOLOAD); 
     /* register netfilter hook */
@@ -327,7 +348,6 @@ static int __init sniffer_init(void)
     }
     // my init
     INIT_LIST_HEAD(&rules.list);
-    DEFINE_SPINLOCK(r_lock);
     init_waitqueue_head(&r_que);
     return 0;
 
