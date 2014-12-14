@@ -34,19 +34,21 @@ int print_packet(char * pkt, int len)
      * ...
      * where pkt[i] is a hex byte */
     int i;
-    struct ip *iph = NULL;          
-    struct tcphdr *tcph = NULL;
-    iph = (struct ip *)(pkt);
-    tcph = (struct tcphdr*)(pkt+20);
+    struct ip *iph = (struct ip *)(pkt);
+    struct tcphdr *tcph = (struct tcphdr*)(pkt+20);
+    int sp=ntohs(tcph->th_sport);
+    int dp=ntohs(tcph->th_dport);
+    char *sinfo = strdup(inet_ntoa(iph->ip_src));
+    char *dinfo = strdup(inet_ntoa(iph->ip_dst));
 
-    dprintf(outfd, "\n%s:%d -> %s:%d", inet_ntoa(iph->ip_src), ntohs(tcph->th_sport), inet_ntoa(iph->ip_dst), ntohs(tcph->th_dport));
+    dprintf(outfd,"\n%s:%d -> %s:%d",sinfo,sp,dinfo,dp);
 
     for (i = 0; i < len; ++i){
         if(i % 64 == 0)dprintf(outfd,"\n");
-            dprintf(outfd,"%.2x ",(unsigned char)pkt[i]);
+        dprintf(outfd,"%.2x ",(unsigned char)pkt[i]);
     }
     dprintf(outfd,"\n");
-    
+
     return 0;
 }
 

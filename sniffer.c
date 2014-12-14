@@ -159,6 +159,7 @@ static long sniffer_fs_ioctl(struct file *file, unsigned int cmd, unsigned long 
                 if(cmp(r_t,entry)){
                     r_t->mode = entry->mode;
                     r_t->action = entry->action;
+                    return err;
                 }
             };
             r_tmp= vmalloc(sizeof(struct rule));
