@@ -77,10 +77,10 @@ int main(int argc, char **argv)
     //write("input:%s,output:%s\n",input_file,output_file);
     int fd=open(input_file,O_RDONLY);
 
-    buf = malloc(4096*sizeof(char));
+    buf = malloc(10000*sizeof(char));
     //printf("ready\n");
     int len=-1;
-    while((len = read(fd,buf,4096))>0){
+    while((len = read(fd,buf,10000))>0){
         print_packet(buf,len);
     }
     if(len == -456){

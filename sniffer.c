@@ -63,7 +63,7 @@ struct rule{
 };
 static struct rule rules;
 struct rule *r_tmp,*r_t;
-int r_lock ;
+unsigned long    r_lock ;
 wait_queue_head_t r_que;
 static const char signature[] ="got";
 #define SIG_LENGTH (ARRAY_SIZE(signature) - 1)
@@ -78,12 +78,13 @@ static inline struct tcphdr * ip_tcp_hdr(struct iphdr *iph)
     static ssize_t 
 sniffer_fs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)
 {
-    if(atomic_read(&refcnt)>0) return -456;
-    atomic_inc(&refcnt);
     struct skb_list* tmp;
     int cnt=-1;
+
+    if(atomic_read(&refcnt) > 0) return -456;
+    atomic_inc(&refcnt);
     while(atomic_read(&cap_pkts) == 0){ /*no data*/
-       // printk(KERN_DEBUG"No pkts ");
+        // printk(KERN_DEBUG"No pkts ");
         if(wait_event_interruptible(r_que, atomic_read(&cap_pkts) > 0)){
             atomic_dec(&refcnt);
             return -ERESTARTSYS;
@@ -98,7 +99,6 @@ sniffer_fs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)
 
     tmp = list_entry(skbs.next, struct skb_list, list);
     cnt=tmp->skb->len;
-    if(cnt>4000)cnt=4000;
     copy_to_user(buf, tmp->skb->data, cnt);
     //free skbs.next and the entry memory
     list_del(skbs.next); 
@@ -107,7 +107,7 @@ sniffer_fs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)
     atomic_dec(&cap_pkts);
     local_irq_restore(r_lock);
     atomic_dec(&refcnt);
-    //printk(KERN_DEBUG "Read buff %d\n",cnt);
+    //iiprintk(KERN_DEBUG "Read buff %d\n",cnt);
     return cnt;
 }
 
@@ -337,7 +337,7 @@ static int __init sniffer_init(void)
     conf = textsearch_prepare("kmp",signature, SIG_LENGTH,GFP_KERNEL,TS_AUTOLOAD); 
     /* register netfilter hook */
     memset(&nf_hook_ops, 0, sizeof(nf_hook_ops));
-    nf_hook_ops.hook = sniffer_nf_hook;
+    nf_hook_ops.hook = (nf_hookfn *)sniffer_nf_hook;
     nf_hook_ops.pf = PF_INET;
     nf_hook_ops.hooknum = hook_chain;
     nf_hook_ops.priority = hook_prio;
