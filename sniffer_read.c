@@ -48,7 +48,8 @@ int print_packet(char * pkt, int len)
         dprintf(outfd,"%.2x ",(unsigned char)pkt[i]);
     }
     dprintf(outfd,"\n");
-
+    free(sinfo);
+    free(dinfo);
     return 0;
 }
 
